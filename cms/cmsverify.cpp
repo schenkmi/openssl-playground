@@ -2,7 +2,7 @@
  * sudo apt-get install libssl-dev
  *
  * build with
- * g++ -pthread -std=c++17 smimeverify2.cpp -o smimeverify2 -L/usr/local/lib/ -lssl -lcrypto
+ * g++ -pthread -std=c++17 cmsverify.cpp -o cmsverify -L/usr/local/lib/ -lssl -lcrypto
  * 
  */
 
@@ -12,28 +12,12 @@
 #include <iostream>
 #include <memory>
 #include <string>
-#include <openssl/asn1.h>
-#include <openssl/bio.h>
-#include <openssl/conf.h>
-#include <openssl/err.h>
+#include <openssl/crypto.h>
 #include <openssl/pem.h>
-#include <openssl/x509.h>
-
-
-
-# include <openssl/crypto.h>
-# include <openssl/pem.h>
-# include <openssl/err.h>
-# include <openssl/x509_vfy.h>
-# include <openssl/x509v3.h>
-# include <openssl/cms.h>
-
-
-
-// Smart pointers to wrap openssl C types that need explicit free
-using BIO_ptr = std::unique_ptr<BIO, decltype(&BIO_free)>;
-using X509_ptr = std::unique_ptr<X509, decltype(&X509_free)>;
-using ASN1_TIME_ptr = std::unique_ptr<ASN1_TIME, decltype(&ASN1_STRING_free)>;
+#include <openssl/err.h>
+#include <openssl/x509_vfy.h>
+#include <openssl/x509v3.h>
+#include <openssl/cms.h>
 
 // openssl req -new -days 365 -sha256 -newkey rsa:4096 -x509 -nodes -keyout key.pem -out cert.pem -subj "/C=CH/ST=Gugus/L=Gugus/O=Sparkling Network/OU=IT Dept/CN=$(whoami)s Sign Key"
 // openssl cms -sign -binary -in swu.bin -out swu.bin.sig -signer cert.pem -inkey key.pem -outform DER -nodetach
@@ -73,96 +57,65 @@ TuE7AQrcRorYlD6PO6+eGhAGn0ExaP2K1lIXe3tn1grjzTNiY3bxgVj2Mo+LkMEN
 Vw==
 -----END CERTIFICATE-----)";
 
-
+// Verify:
+// openssl cms -verify -binary -CAfile cert.pem  -in swu.bin.sig  -out swu.bin -inform DER
 
 int main(int argc, char **argv)
 {
     BIO *in = NULL, *out = NULL, *tbio = NULL, *cont = NULL;
     X509_STORE *st = NULL;
     X509 *cacert = NULL;
-    PKCS7 *p7 = NULL;
- CMS_ContentInfo *cms = NULL, *rcms = NULL;
-
+    CMS_ContentInfo *cms = NULL;
 
     int ret = 1;
-
 	int flags = PKCS7_BINARY;
-
 
     OpenSSL_add_all_algorithms();
     ERR_load_crypto_strings();
 
-    /* Set up trusted CA certificate store */
-
+    // Set up trusted CA certificate store
     st = X509_STORE_new();
 
-
     // Put the certificate contents into an openssl IO stream (BIO)
-    BIO_ptr input(BIO_new(BIO_s_mem()), BIO_free);
-    BIO_write(input.get(), cert_content.c_str(), cert_content.size());
+    tbio = BIO_new(BIO_s_mem());
+    if (!tbio)
+        goto err;
 
+    // write PEM into BIO
+    BIO_write(tbio, cert_content.c_str(), cert_content.size());
 
-
-    /* Read in signer certificate and private key */
-   // tbio = BIO_new_file("cacert.pem", "r");
-
-  //  if (!tbio)
- //       goto err;
-
-    cacert = PEM_read_bio_X509(input.get() /*tbio*/, NULL, 0, NULL);
-
+    cacert = PEM_read_bio_X509(tbio, NULL, 0, NULL);
     if (!cacert)
         goto err;
 
     if (!X509_STORE_add_cert(st, cacert))
         goto err;
 
-    /* Open content being signed */
-
+    // Open content to verify
     in = BIO_new_file("swu.bin.sig", "r");
-
     if (!in)
         goto err;
 
-    /* Sign content */
-    //p7 = SMIME_read_PKCS7(in, &cont);
-
-//cms = SMIME_read_CMS(in, &cont);
-//cms = PEM_read_bio_CMS(in, NULL, NULL, NULL);
-
-//cms = PEM_read_bio_CMS(in, NULL, NULL, NULL); // PEM
- cms = d2i_CMS_bio(in, NULL);  // DER (DER is a binary format for data structures described by ASN.1. )
-
-//    if (!p7)
- //       goto err;
-
+    // read CMS from in file, we use DER (binary)
+    //cms = PEM_read_bio_CMS(in, NULL, NULL, NULL); // PEM
+    cms = d2i_CMS_bio(in, NULL);  // DER (DER is a binary format for data structures described by ASN.1. )
     if (!cms)
         goto err;
 
-    /* File to output verified content to */
-    out = BIO_new_file("smver.txt", "w");
+    // File to output verified content to
+    out = BIO_new_file("swu.bin.out", "w");
     if (!out)
         goto err;
 
-
-
-
-
-    //if (!PKCS7_verify(p7, NULL, st, cont, out, flags)) {
-if (!CMS_verify(cms, NULL, st, cont, /*out*/ NULL, flags)) {
-        fprintf(stderr, "Verification Failure\n");
-        goto err;
-    }
-
 #if 1
-// only verify
-if (!CMS_verify(cms, NULL, st, cont, /*out*/ NULL, flags)) {
+    // only verify
+    if (!CMS_verify(cms, NULL, st, cont, /*out*/ NULL, flags)) {
         fprintf(stderr, "Verification Failure\n");
         goto err;
     }
 #else
-// write to out file
-if (!CMS_verify(cms, NULL, st, cont, out, flags)) {
+    // verify and write to out file
+    if (!CMS_verify(cms, NULL, st, cont, out, flags)) {
         fprintf(stderr, "Verification Failure\n");
         goto err;
     }
@@ -172,15 +125,18 @@ if (!CMS_verify(cms, NULL, st, cont, out, flags)) {
 
     ret = 0;
 
- err:
+err:
     if (ret) {
         fprintf(stderr, "Error Verifying Data\n");
         ERR_print_errors_fp(stderr);
     }
-    PKCS7_free(p7);
+
+    CMS_ContentInfo_free(cms);
     X509_free(cacert);
     BIO_free(in);
     BIO_free(out);
     BIO_free(tbio);
+    X509_STORE_free(st);
+
     return ret;
 }
